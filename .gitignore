@@ -1,0 +1,16 @@
+# Binaries
+*.exe
+bin
+/mimic
+
+# Test binary, built with `go test -c`
+*.test
+
+# Coverage output
+*.out
+
+# Claude Code worktrees
+.claude/
+
+# GoReleaser output
+dist/
