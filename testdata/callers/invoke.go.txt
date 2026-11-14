@@ -1,0 +1,85 @@
+package m
+
+import (
+	"fmt"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+// invoke drives every method of the mock m (a pointer to a generated mock) through reflection:
+// a call without its Func must panic with the documented message and record nothing, and a call
+// with a zero-value Func must be recorded exactly once.
+func invoke(t *testing.T, m any) {
+	t.Helper()
+
+	v := reflect.ValueOf(m)
+	st := v.Elem()
+	tn := st.Type().Name()
+
+	if i := strings.IndexByte(tn, '['); i >= 0 {
+		tn = tn[:i]
+	}
+
+	n := 0
+
+	for i := 0; i < st.NumField(); i++ {
+		f := st.Type().Field(i)
+		if !f.IsExported() || f.Type.Kind() != reflect.Func || !strings.HasSuffix(f.Name, "Func") {
+			continue
+		}
+
+		n++
+
+		name := strings.TrimSuffix(f.Name, "Func")
+		mv := v.MethodByName(name)
+		args := make([]reflect.Value, mv.Type().NumIn())
+
+		if mv.Type().IsVariadic() {
+			args = args[:len(args)-1]
+		}
+
+		for j := range args {
+			args[j] = reflect.Zero(mv.Type().In(j))
+		}
+
+		want := fmt.Sprintf("mimic: %s.%s called, but %s is nil", tn, name, f.Name)
+		if got := callRecover(mv, args); got != want {
+			t.Errorf("nil Func panic = %q, want %q", got, want)
+		}
+
+		ft := f.Type
+		st.Field(i).Set(reflect.MakeFunc(ft, func([]reflect.Value) []reflect.Value {
+			res := make([]reflect.Value, ft.NumOut())
+			for k := range res {
+				res[k] = reflect.Zero(ft.Out(k))
+			}
+
+			return res
+		}))
+
+		if got := callRecover(mv, args); got != "" {
+			t.Errorf("%s: unexpected panic %q", name, got)
+		}
+
+		if got := v.MethodByName(name + "Calls").Call(nil)[0].Len(); got != 1 {
+			t.Errorf("%sCalls() has %d entries, want 1", name, got)
+		}
+	}
+
+	if n == 0 {
+		t.Error("mock has no Func field")
+	}
+}
+
+func callRecover(mv reflect.Value, args []reflect.Value) (msg string) {
+	defer func() {
+		if r := recover(); r != nil {
+			msg = fmt.Sprint(r)
+		}
+	}()
+
+	mv.Call(args)
+
+	return ""
+}

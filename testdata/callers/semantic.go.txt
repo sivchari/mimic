@@ -1,0 +1,218 @@
+package semantic
+
+import (
+	"context"
+	"errors"
+	"strconv"
+	"sync"
+	"testing"
+
+	"example.com/suite/domain"
+	"example.com/suite/model"
+	"example.com/suite/other"
+	"example.com/suite/semantic/dm"
+	"example.com/suite/resolve"
+	"example.com/suite/semantic/rm"
+)
+
+var (
+	_ domain.Repo   = &dm.RepoMock{}
+	_ domain.Multi5 = &dm.Multi5Mock{}
+	_ domain.Var    = &dm.VarMock{}
+	_ domain.Names  = &dm.NamesMock{}
+	_ domain.Embeds = &dm.EmbedsMock{}
+	_ resolve.Aliased = &rm.AliasedMock{}
+	_ resolve.Consts  = &rm.ConstsMock{}
+	// An embedding mock also implements the embedded interfaces.
+	_ domain.Repo = &dm.EmbedsMock{}
+	_ other.Base  = &dm.EmbedsMock{}
+)
+
+func TestRepo(t *testing.T) {
+	m := &dm.RepoMock{
+		GetFunc: func(_ context.Context, id string) (*model.User, error) { return &model.User{ID: id}, nil },
+	}
+
+	var r domain.Repo = m
+
+	u, err := r.Get(context.Background(), "x")
+	if err != nil || u.ID != "x" {
+		t.Fatal(u, err)
+	}
+
+	calls := m.GetCalls()
+	if len(calls) != 1 || calls[0].ID != "x" || calls[0].Ctx == nil {
+		t.Fatal(calls)
+	}
+}
+
+func TestNilFuncPanics(t *testing.T) {
+	defer func() {
+		const want = "mimic: RepoMock.Get called, but GetFunc is nil"
+		if got := recover(); got != want {
+			t.Fatalf("panic = %v, want %q", got, want)
+		}
+	}()
+
+	(&dm.RepoMock{}).Get(context.Background(), "x")
+}
+
+func TestMulti5Variadic(t *testing.T) {
+	m := &dm.Multi5Mock{
+		ListFunc: func(_ context.Context, _ other.Thing, opts ...other.Alias) ([]*model.User, int, error) {
+			return nil, len(opts), errors.New("e")
+		},
+		CloseFunc: func() {},
+	}
+
+	var d domain.Multi5 = m
+
+	if _, n, _ := d.List(context.Background(), other.Thing{N: 1}, other.Thing{}, other.Thing{}); n != 2 {
+		t.Fatal(n)
+	}
+
+	c := m.ListCalls()
+	if len(c) != 1 || c[0].Filter.N != 1 || len(c[0].Opts) != 2 {
+		t.Fatal(c)
+	}
+
+	d.Close()
+
+	if len(m.CloseCalls()) != 1 {
+		t.Fatal("Close was not recorded")
+	}
+}
+
+func TestNamesAreSanitized(t *testing.T) {
+	m := &dm.NamesMock{
+		BFunc: func(n int, mock_ string, fn bool) (int, error) { return n, nil },
+		AFunc: func(n int, s string) error { return nil },
+	}
+
+	var d domain.Names = m
+
+	d.B(1, "s", true)
+
+	c := m.BCalls()[0]
+	if c.N != 1 || c.Mock != "s" || !c.Fn {
+		t.Fatal(c)
+	}
+}
+
+// The unexported aliases of package resolve are written as their targets, so a caller outside
+// the package can use plain types.
+func TestResolvedAliases(t *testing.T) {
+	m := &rm.AliasedMock{
+		GetFunc: func(id string) (model.User, error) { return model.User{ID: id}, nil },
+		SeenFunc: func(s map[string]struct{}) bool {
+			_, ok := s["a"]
+
+			return ok
+		},
+	}
+
+	var a resolve.Aliased = m
+
+	if u, err := a.Get("x"); err != nil || u.ID != "x" {
+		t.Fatal(u, err)
+	}
+
+	if !a.Seen(map[string]struct{}{"a": {}}) {
+		t.Fatal("Seen did not see the key")
+	}
+
+	if c := m.SeenCalls(); len(c) != 1 || len(c[0].S) != 1 {
+		t.Fatal(c)
+	}
+}
+
+// Array lengths that were unexported constants are written as their values.
+func TestResolvedConstants(t *testing.T) {
+	m := &rm.ConstsMock{
+		ArrFunc: func(a [10]int, b [4]byte) [6]string { return [6]string{} },
+	}
+
+	var c resolve.Consts = m
+
+	c.Arr([10]int{9: 1}, [4]byte{})
+
+	if calls := m.ArrCalls(); len(calls) != 1 || calls[0].A[9] != 1 {
+		t.Fatal(calls)
+	}
+}
+
+func TestConcurrentCalls(t *testing.T) {
+	const goroutines, calls = 32, 500
+
+	m := &dm.RepoMock{
+		GetFunc: func(_ context.Context, id string) (*model.User, error) { return &model.User{ID: id}, nil },
+	}
+
+	var wg sync.WaitGroup
+
+	for g := range goroutines {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for i := range calls {
+				id := strconv.Itoa(g*calls + i)
+				if u, _ := m.Get(context.Background(), id); u.ID != id {
+					t.Error("mismatch")
+				}
+
+				if i%100 == 0 {
+					_ = m.GetCalls()
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	got := m.GetCalls()
+	if len(got) != goroutines*calls {
+		t.Fatalf("recorded %d calls, want %d", len(got), goroutines*calls)
+	}
+
+	seen := make(map[string]bool, len(got))
+	for _, c := range got {
+		if seen[c.ID] {
+			t.Fatalf("duplicate call %s", c.ID)
+		}
+
+		seen[c.ID] = true
+	}
+}
+
+func mapSlice[T, U any](s []T, f func(T) U) []U {
+	out := make([]U, 0, len(s))
+	for _, v := range s {
+		out = append(out, f(v))
+	}
+
+	return out
+}
+
+// TestCallsAreAnonymousStructs checks that a call record is a plain struct type, so a func
+// literal over that struct infers the type arguments of a generic helper.
+func TestCallsAreAnonymousStructs(t *testing.T) {
+	m := &dm.RepoMock{
+		GetFunc: func(context.Context, string) (*model.User, error) { return nil, nil },
+	}
+
+	_, _ = m.Get(context.Background(), "a")
+	_, _ = m.Get(context.Background(), "b")
+
+	ids := mapSlice(m.GetCalls(), func(c struct {
+		Ctx context.Context
+		ID  string
+	}) string {
+		return c.ID
+	})
+
+	if len(ids) != 2 || ids[0] != "a" || ids[1] != "b" {
+		t.Fatal(ids)
+	}
+}
