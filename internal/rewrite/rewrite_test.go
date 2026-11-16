@@ -570,3 +570,28 @@ func TestImports(t *testing.T) {
 		t.Fatalf("unexpected import block:\n%s", lines)
 	}
 }
+
+func TestWriter_Type_AliasWhenPackageNameDiffersFromPathBase(t *testing.T) {
+	t.Parallel()
+
+	l := module(t, map[string]string{
+		"proto/contract/v1/v1.go": "package contractv1\n\ntype X struct{}\n",
+		"y/y.go":                  "package y\n\nimport v1 \"example.com/rw/proto/contract/v1\"\n\ntype I interface{ M(v1.X) }\n",
+	})
+
+	w := rewrite.NewWriter(l, "example.com/rw/out")
+
+	got, err := write(t, w, "v1.X", ctxOf(l, "example.com/rw/y"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got != "v1.X" {
+		t.Fatalf("type = %q, want v1.X", got)
+	}
+
+	want := "\tv1 \"example.com/rw/proto/contract/v1\"\n"
+	if lines := w.Imports.Lines(); lines != want {
+		t.Fatalf("imports = %q, want %q", lines, want)
+	}
+}

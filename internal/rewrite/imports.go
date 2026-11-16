@@ -17,6 +17,10 @@ type Imports struct {
 	byPath map[string]string
 	byName map[string]string
 	used   map[string]bool
+
+	// pkgName returns the package clause name of an import path; nil falls back to the last
+	// element of the path.
+	pkgName func(string) string
 }
 
 // NewImports returns an import table in which sync is reserved for the generated code itself.
@@ -25,6 +29,15 @@ func NewImports() *Imports {
 	im.reserve("sync", "sync")
 
 	return im
+}
+
+// declaredName returns the package clause name of p, which Go uses when an import has no alias.
+func (im *Imports) declaredName(p string) string {
+	if im.pkgName != nil {
+		return im.pkgName(p)
+	}
+
+	return path.Base(p)
 }
 
 func (im *Imports) reserve(p, name string) {
@@ -99,7 +112,7 @@ func (im *Imports) Lines() string {
 			b.WriteString("\n")
 		}
 
-		if n := im.byPath[p]; n == path.Base(p) {
+		if n := im.byPath[p]; n == im.declaredName(p) {
 			fmt.Fprintf(&b, "\t%q\n", p)
 		} else {
 			fmt.Fprintf(&b, "\t%s %q\n", n, p)

@@ -33,7 +33,10 @@ type Writer struct {
 
 // NewWriter returns a Writer for an output package with import path outPath ("" if unknown).
 func NewWriter(l *load.Loader, outPath string) *Writer {
-	return &Writer{Imports: NewImports(), l: l, outPath: outPath}
+	im := NewImports()
+	im.pkgName = l.PackageName
+
+	return &Writer{Imports: im, l: l, outPath: outPath}
 }
 
 // IsSelf reports whether p is the output package.
